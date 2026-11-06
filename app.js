@@ -109,6 +109,7 @@ const I = {
   plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
   link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>',
   edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4z"/></svg>',
+  speak: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18V6a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-5 4z"/><path d="M20 9.5a4 4 0 0 1 0 5M8 8.5h5M8 11h3"/></svg>',
   clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M10 2h4"/></svg>',
   refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 0 0-14.6-4.5M4 4v3h3M4 13a8 8 0 0 0 14.6 4.5M20 20v-3h-3"/></svg>',
 };
@@ -364,6 +365,7 @@ async function renderStudio(sid) {
       <div class="top"><span class="eyebrow">Line ${st.idx + 1} von ${L.length}</span>
         ${l.takes.length ? `<span class="badge done">${I.check} ${l.takes.length} ${l.takes.length === 1 ? 'Take' : 'Takes'}</span>` : '<span class="badge">Offen</span>'}</div>
       <p class="line-text">${animate ? reveal(l.text, dir ? 80 : 500) : esc(l.text)}</p>
+      ${l.pron ? `<div class="line-pron">${I.speak}<div><div class="lbl">Aussprache</div>${esc(l.pron)}</div></div>` : ''}
       ${l.note ? `<div class="line-note">${I.bulb}<span>${esc(l.note)}</span></div>` : ''}
       ${limitText(l) ? `<div class="line-limit">${I.clock}<span>Länge: <b>${limitText(l)}</b></span></div>` : ''}
       <div class="pager"><span></span><div class="dots">${L.map((x, i) => `<button data-go="${i}" class="${i === st.idx ? 'cur' : ''} ${x.takes.length ? 'has' : ''}" aria-label="Line ${i + 1}"></button>`).join('')}</div><span></span></div>
@@ -407,8 +409,25 @@ async function renderStudio(sid) {
     $('#miclbl').textContent = rec.active ? shortLabel(st.micLabel) : 'Mikrofon';
   }
   function shortLabel(s) { s = String(s || 'Mikrofon').replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)\s*$/i, ''); return s.length > 32 ? s.slice(0, 31) + '…' : s; }
+  // Teleprompter: zeigt die Line oben an, wenn die Karte beim Aufnehmen nicht im Bild ist
+  const promptEl = document.createElement('div'); promptEl.className = 'prompt'; promptEl.setAttribute('aria-hidden', 'true'); document.body.appendChild(promptEl);
+  function updPrompt() {
+    const pr = promptEl; const t = view.querySelector('.line-text'); const l = line();
+    if (!pr || !t || !l) return;
+    const navH = view.querySelector('.nav')?.offsetHeight || 60;
+    const r = t.getBoundingClientRect();
+    const hidden = r.top < navH + 4 || r.bottom > window.innerHeight;
+    const show = (st.state === 'counting' || st.state === 'rec') && hidden;
+    if (show && pr.dataset.lid !== l.id) {
+      pr.dataset.lid = l.id;
+      pr.innerHTML = `<div class="pt">${esc(l.text)}</div>${l.pron ? `<div class="pp">${I.speak}${esc(l.pron)}</div>` : ''}`;
+    }
+    pr.style.top = navH + 'px';
+    pr.classList.toggle('show', show);
+  }
+  const onScrollPrompt = () => updPrompt(); window.addEventListener('scroll', onScrollPrompt, { passive: true });
   function renderHint() {
-    renderMic(); renderLen();
+    renderMic(); renderLen(); updPrompt();
     const h = $('#hint'); const b = $('#recbtn');
     b.classList.toggle('on', st.state === 'rec'); b.classList.toggle('counting', st.state === 'counting');
     b.disabled = st.state === 'busy' || !line();
@@ -498,14 +517,18 @@ async function renderStudio(sid) {
     if (!(await ensureMic())) return renderHint();
     if (st.countdown) {
       st.state = 'counting'; renderHint();
-      const ov = document.createElement('div'); ov.className = 'countdown'; document.body.appendChild(ov); st.ov = ov;
-      [3, 2, 1].forEach((n, i) => st.cdTimers.push(setTimeout(() => { ov.innerHTML = `<span>${n}</span>`; }, i * 1000)));
-      st.cdTimers.push(setTimeout(() => { beginRec(); ov.classList.add('out'); ov.innerHTML = ''; setTimeout(() => ov.remove(), 300); }, 3000));
+      // Countdown ohne Abdecken: Zahl im Timer + kleiner Kreis unten, die Line bleibt lesbar
+      const ov = document.createElement('div'); ov.className = 'cd-float'; document.body.appendChild(ov); st.ov = ov;
+      const tm = $('#timer');
+      [3, 2, 1].forEach((n, i) => st.cdTimers.push(setTimeout(() => {
+        ov.innerHTML = `<span>${n}</span>`; tm.innerHTML = `<span class="cd-num">${n}</span>`;
+      }, i * 1000)));
+      st.cdTimers.push(setTimeout(() => { beginRec(); ov.classList.add('out'); setTimeout(() => ov.remove(), 350); }, 3000));
     } else beginRec();
   }
   function cancelCountdown() {
     st.cdTimers.forEach(clearTimeout); st.cdTimers = [];
-    st.ov && st.ov.remove(); st.state = 'idle'; renderHint();
+    st.ov && st.ov.remove(); st.state = 'idle'; $('#timer').textContent = fmt(0); renderHint();
   }
   function beginRec() {
     st.cdTimers = []; rec.begin(); st.t0 = performance.now() - rec.preSec * 1000; st.state = 'rec'; renderHint();
@@ -676,7 +699,7 @@ async function renderStudio(sid) {
   cleanup = () => {
     prev && prev();
     cancelAnimationFrame(st.raf); st.cdTimers.forEach(clearTimeout); st.ov && st.ov.remove();
-    window.removeEventListener('resize', onResize); document.removeEventListener('keydown', onKey); window.removeEventListener('beforeunload', onUnload);
+    promptEl.remove(); window.removeEventListener('resize', onResize); window.removeEventListener('scroll', onScrollPrompt); document.removeEventListener('keydown', onKey); window.removeEventListener('beforeunload', onUnload);
     rec.onLevel = null; rec.stop();
   };
 
@@ -761,6 +784,7 @@ function adminDashboard(pw, data) {
                 <div class="aline-body">
                   <textarea class="inline-input text" rows="1" data-field="text" aria-label="Line-Text">${esc(l.text)}</textarea>
                   <textarea class="inline-input note" rows="1" data-field="note" placeholder="+ Regieanweisung (z. B. aufgeregt, Spider-Man-mäßig)" aria-label="Regieanweisung">${esc(l.note)}</textarea>
+                  <textarea class="inline-input note pron" rows="1" data-field="pron" placeholder="+ Aussprache (z. B. MIT = „Em-Ai-Tie“, Betonung auf …)" aria-label="Aussprache">${esc(l.pron || '')}</textarea>
                   <div class="limits">${I.clock}<span>Länge</span>
                     <label>min <input inputmode="decimal" data-lim="min" placeholder="–" value="${l.min_sec ?? ''}" aria-label="Mindestlänge in Sekunden"></label>
                     <label>max <input inputmode="decimal" data-lim="max" placeholder="–" value="${l.max_sec ?? ''}" aria-label="Maximallänge in Sekunden"></label>
@@ -911,13 +935,14 @@ function adminDashboard(pw, data) {
     if (!t.matches('textarea.inline-input')) return;
     const lid = t.closest('[data-lid]').dataset.lid;
     const l = speakers.flatMap((s) => s.lines).find((x) => x.id === lid);
-    const val = t.dataset.field === 'text' ? t.value.trim() : t.value.trim();
-    if (!l || val === l[t.dataset.field]) return;
+    const val = t.value.trim();
+    if (!l || val === (l[t.dataset.field] ?? '')) return;
     if (t.dataset.field === 'text' && !val) { t.value = l.text; autosize(t); return toast('Line darf nicht leer sein', 'warn'); }
     try {
-      await api.rpc('admin_update_line', { pw, lid, new_text: t.dataset.field === 'text' ? val : null, new_note: t.dataset.field === 'note' ? val : null });
+      if (t.dataset.field === 'pron') await api.rpc('admin_set_line_pron', { pw, lid, new_pron: val });
+      else await api.rpc('admin_update_line', { pw, lid, new_text: t.dataset.field === 'text' ? val : null, new_note: t.dataset.field === 'note' ? val : null });
       l[t.dataset.field] = val; toast('Gespeichert', 'ok', 1200);
-    } catch (err) { toast(err.message, 'err'); }
+    } catch (err) { toast(/Datenbank nicht eingerichtet/.test(err.message) ? 'Bitte zuerst UPDATE-2-aussprache.sql in Supabase ausführen' : err.message, 'err', 4500); }
   });
 
   // Alle 20 s still aktualisieren (nicht beim Tippen / Abspielen)

@@ -49,6 +49,8 @@ create table if not exists public.trash (
 -- Optionale Mindest-/Maximallänge pro Line (Sekunden)
 alter table public.lines add column if not exists min_sec real;
 alter table public.lines add column if not exists max_sec real;
+-- Optionale Aussprache-Notiz pro Line
+alter table public.lines add column if not exists pron text not null default '';
 
 create index if not exists lines_speaker_idx on public.lines(speaker_id);
 create index if not exists takes_line_idx    on public.takes(line_id);
@@ -138,7 +140,7 @@ create or replace function public._lines_json(sid uuid) returns json
 language sql stable security definer set search_path = public as $$
   select coalesce(json_agg(json_build_object(
            'id', l.id, 'text', l.text, 'note', l.note, 'sort', l.sort,
-           'min_sec', l.min_sec, 'max_sec', l.max_sec,
+           'min_sec', l.min_sec, 'max_sec', l.max_sec, 'pron', l.pron,
            'takes', (
              select coalesce(json_agg(json_build_object(
                       'id', t.id, 'path', t.path, 'duration', t.duration,
@@ -342,6 +344,13 @@ begin
     raise exception 'Mindestlänge ist größer als Maximallänge';
   end if;
   update public.lines set min_sec = new_min, max_sec = new_max where id = lid;
+end $$;
+
+create or replace function public.admin_set_line_pron(pw text, lid uuid, new_pron text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  perform public._check_admin(pw);
+  update public.lines set pron = coalesce(trim(new_pron), '') where id = lid;
 end $$;
 
 create or replace function public.admin_move_line(pw text, lid uuid, dir int) returns void
