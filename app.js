@@ -58,7 +58,9 @@ const GRADS = [['#ff375f', '#ff9f0a'], ['#5e5ce6', '#bf5af2'], ['#0a84ff', '#64d
 function avatar(name, cls = '') {
   let h = 0; for (const c of String(name)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
   const [a, b] = GRADS[h % GRADS.length];
-  return `<div class="avatar ${cls}" style="background:linear-gradient(135deg,${a},${b})">${esc(String(name).trim().charAt(0).toUpperCase() || '?')}</div>`;
+  const key = Object.keys(CFG.AVATARS || {}).find((k) => k.trim().toLowerCase() === String(name).trim().toLowerCase());
+  const img = key ? `<img src="${esc(CFG.AVATARS[key])}" alt="" loading="lazy" decoding="async" onload="this.classList.add('in')" onerror="this.remove()">` : '';
+  return `<div class="avatar ${cls}" style="background:linear-gradient(135deg,${a},${b})">${esc(String(name).trim().charAt(0).toUpperCase() || '?')}${img}</div>`;
 }
 const fmt = (s) => { s = Math.max(0, s || 0); const m = Math.floor(s / 60); return `${m}:${(s % 60).toFixed(1).padStart(4, '0')}`; };
 const fmtTime = (iso) => new Date(iso).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -235,7 +237,8 @@ function renderNotConfigured() {
    ===================================================================== */
 async function renderHome() {
   const v = mount(`
-    <div style="height:calc(24px + env(safe-area-inset-top))"></div>
+    <div style="height:calc(20px + env(safe-area-inset-top))"></div>
+    ${CFG.BANNER ? `<div class="banner"><img src="${esc(CFG.BANNER)}" alt="${esc(TITLE)}" decoding="async" onload="this.parentNode.classList.add('in')" onerror="this.parentNode.remove()"></div>` : ''}
     <div class="eyebrow fade-up">${esc(TITLE)}</div>
     <h1 class="large-title">${reveal('Deine Stimme.')}<br><span class="gradient-text">Deine Lines.</span></h1>
     <p class="subtitle fade-up" style="--d:500ms">Tippe auf deinen Namen, um loszulegen.</p>

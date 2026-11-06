@@ -14,4 +14,17 @@ window.LINE_STUDIO_CONFIG = {
 
   // Name der Seite (oben groß angezeigt)
   TITLE: "Constars Lines",
+
+  // Banner oben auf der Startseite (leer lassen = kein Banner)
+  BANNER: "img/banner.jpg",
+
+  // Profilbilder: "Name genau wie in der Regie": "Pfad zum Bild"
+  // Wer hier fehlt, bekommt automatisch einen farbigen Kreis mit Anfangsbuchstaben.
+  AVATARS: {
+    "Ali": "img/avatars/ali.jpg",
+    "Ehlert": "img/avatars/ehlert.jpg",
+    "Schkade": "img/avatars/schkade.jpg",
+    "Connor": "img/avatars/connor.jpg",
+    "Paul": "img/avatars/paul.jpg",
+  },
 };
