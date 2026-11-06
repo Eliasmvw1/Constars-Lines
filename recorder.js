@@ -24,7 +24,7 @@ export class StudioRecorder {
     this.ctx = null; this.stream = null; this.node = null; this.src = null;
     this.recording = false; this.chunks = []; this.pre = []; this.preLen = 0;
     this.sampleRate = 48000; this.onLevel = null; this.onWave = null;
-    this.peakHold = 0; this.clipped = false;
+    this.peakHold = 0; this.clipped = false; this.preSec = 0;
   }
 
   get active() { return !!this.stream; }
@@ -70,6 +70,7 @@ export class StudioRecorder {
   }
 
   begin() {
+    this.preSec = this.preLen / this.sampleRate;
     this.chunks = this.pre.slice(); this.pre = []; this.preLen = 0;
     this.clipped = false; this.recording = true;
   }
@@ -115,4 +116,15 @@ export function encodeWav(pcm, rate) {
     o += 3;
   }
   return new Blob([buf], { type: 'audio/wav' });
+}
+
+// Schneidet ein 24-Bit-Mono-WAV auf maxSec Sekunden (ohne Neukodierung)
+export function trimWav(blob, maxSec, rate) {
+  return blob.arrayBuffer ? (async () => {
+    const buf = await blob.arrayBuffer(); const bytes = 3;
+    const n = Math.min((buf.byteLength - 44) / bytes, Math.round(maxSec * rate));
+    const out = buf.slice(0, 44 + n * bytes); const v = new DataView(out);
+    v.setUint32(4, 36 + n * bytes, true); v.setUint32(40, n * bytes, true);
+    return new Blob([out], { type: 'audio/wav' });
+  })() : blob;
 }

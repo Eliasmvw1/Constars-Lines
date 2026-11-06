@@ -1,4 +1,4 @@
-import { StudioRecorder } from './recorder.js';
+import { StudioRecorder, trimWav } from './recorder.js';
 
 const CFG = window.LINE_STUDIO_CONFIG || {};
 const TITLE = CFG.TITLE || 'Line Studio';
@@ -62,8 +62,30 @@ function avatar(name, cls = '') {
 }
 const fmt = (s) => { s = Math.max(0, s || 0); const m = Math.floor(s / 60); return `${m}:${(s % 60).toFixed(1).padStart(4, '0')}`; };
 const fmtTime = (iso) => new Date(iso).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+const fmtSec = (x) => `${Number(x).toLocaleString('de-DE', { maximumFractionDigits: 1 })} Sek.`;
+function limitText(l) {
+  const mn = l.min_sec, mx = l.max_sec;
+  if (mn && mx) return `${Number(mn).toLocaleString('de-DE', { maximumFractionDigits: 1 })}–${fmtSec(mx)}`;
+  if (mn) return `mind. ${fmtSec(mn)}`;
+  if (mx) return `max. ${fmtSec(mx)}`;
+  return '';
+}
+const parseSec = (v) => { const n = parseFloat(String(v).replace(',', '.')); return isFinite(n) && n > 0 ? Math.round(n * 10) / 10 : null; };
 const slug = (s) => String(s).toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/ß/g, 'ss').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'line';
 const isTouch = matchMedia('(hover: none)').matches;
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Inhalt austauschen und die Höhe weich mitwachsen/-schrumpfen lassen (kein Springen)
+function morph(el, update) {
+  if (!el || reduceMotion) return update();
+  const h0 = el.offsetHeight;
+  update();
+  const h1 = el.offsetHeight;
+  if (Math.abs(h1 - h0) < 2) return;
+  el.style.overflow = 'hidden';
+  const a = el.animate([{ height: h0 + 'px' }, { height: h1 + 'px' }], { duration: 480, easing: 'cubic-bezier(0.32, 0.72, 0, 1)' });
+  a.onfinish = a.oncancel = () => { el.style.overflow = ''; };
+}
+const levelToScale = (p) => { const db = p > 0 ? 20 * Math.log10(p) : -100; return Math.max(0, Math.min(1, (db + 60) / 60)); };
 
 const I = {
   back: '<svg viewBox="0 0 12 20" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2 2 10l8 8"/></svg>',
@@ -85,6 +107,7 @@ const I = {
   plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
   link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>',
   edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4z"/></svg>',
+  clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M10 2h4"/></svg>',
   refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 0 0-14.6-4.5M4 4v3h3M4 13a8 8 0 0 0 14.6 4.5M20 20v-3h-3"/></svg>',
 };
 
@@ -296,14 +319,16 @@ async function renderStudio(sid) {
   const view = mount(`
     <div class="nav"><div class="nav-left"><a class="back" href="#">${I.back} Namen</a></div>
       <div class="nav-title">${esc(data.name)}</div>
-      <div class="nav-right"><button class="icon-btn" data-act="settings" aria-label="Mikrofon & Einstellungen">${I.gear}</button></div></div>
+      <div class="nav-right"><button class="icon-btn" data-act="settings" aria-label="Mikrofon & Einstellungen">${I.mic}</button></div></div>
     <h1 class="large-title sm">${reveal('Hey ' + data.name + '.')}</h1>
     <p class="subtitle fade-up" style="--d:250ms;margin-bottom:22px" id="sub"></p>
     <div class="progress fade-up" style="--d:350ms"><div class="bar"><i id="bar"></i></div><span id="ptext"></span></div>
     <div id="card"></div>
     <div class="deck fade-up" style="--d:500ms">
+      <button class="mic-chip" data-act="settings" id="micchip" aria-label="Mikrofon wählen und testen">${I.mic}<span class="led" id="led"></span><span class="lbl" id="miclbl">Mikrofon</span><span class="act">Wählen &amp; testen</span></button>
       <canvas class="wave" id="wave"></canvas>
       <div class="timer" id="timer">0:00.0</div>
+      <div class="lenbar" id="lenbar"><div class="track"><i id="lenfill"></i><span class="mark" id="lenmin"></span></div><div class="lenlbl" id="lenlbl"></div></div>
       <div class="hint" id="hint"></div>
       <div class="rec-row">
         <button class="side-btn" data-act="prev" aria-label="Vorherige Line">${I.left}</button>
@@ -332,13 +357,14 @@ async function renderStudio(sid) {
   function renderCard(dir = 0, animate = true) {
     const L = st.data.lines; const l = line();
     if (!l) { $('#card').innerHTML = `<div class="line-card"><p class="line-text" style="color:var(--text-2)">Keine Lines.</p></div>`; return; }
-    $('#card').innerHTML = `<div class="line-card ${!animate ? '' : dir > 0 ? 'slide-l' : dir < 0 ? 'slide-r' : 'fade-up'}" style="--d:400ms">
+    morph($('#card'), () => { $('#card').innerHTML = `<div class="line-card ${!animate ? '' : dir > 0 ? 'slide-l' : dir < 0 ? 'slide-r' : 'fade-up'}" style="--d:400ms">
       <div class="top"><span class="eyebrow">Line ${st.idx + 1} von ${L.length}</span>
         ${l.takes.length ? `<span class="badge done">${I.check} ${l.takes.length} ${l.takes.length === 1 ? 'Take' : 'Takes'}</span>` : '<span class="badge">Offen</span>'}</div>
       <p class="line-text">${animate ? reveal(l.text, dir ? 80 : 500) : esc(l.text)}</p>
       ${l.note ? `<div class="line-note">${I.bulb}<span>${esc(l.note)}</span></div>` : ''}
+      ${limitText(l) ? `<div class="line-limit">${I.clock}<span>Länge: <b>${limitText(l)}</b></span></div>` : ''}
       <div class="pager"><span></span><div class="dots">${L.map((x, i) => `<button data-go="${i}" class="${i === st.idx ? 'cur' : ''} ${x.takes.length ? 'has' : ''}" aria-label="Line ${i + 1}"></button>`).join('')}</div><span></span></div>
-    </div>`;
+    </div>`; });
     view.querySelector('[data-act="prev"]').disabled = st.idx === 0 || st.state !== 'idle';
     view.querySelector('[data-act="next"]').disabled = st.idx >= L.length - 1 || st.state !== 'idle';
   }
@@ -359,11 +385,27 @@ async function renderStudio(sid) {
          <button class="btn btn-sm btn-secondary" data-act="retry">Nochmal</button><button class="mini" data-act="save-local" aria-label="Lokal speichern">${I.down}</button>`
       : `<div class="spinner"></div><div class="grow"><div class="t1">Wird gespeichert…</div><div class="t2">${fmt(st.pending.duration)} · WAV ${Math.round(st.pending.sampleRate / 1000)} kHz / 24 Bit</div></div>`}</div>`;
     if (!l.takes.length && !st.pending) html = `<div class="empty">Noch kein Take. Drück auf den roten Knopf.</div>`;
-    box.innerHTML = html;
+    morph(box, () => { box.innerHTML = html; });
     syncPlayButtons();
     $('#takes-foot').textContent = l.takes.length > 1 ? 'Markiere mit dem Stern deinen besten Take.' : '';
   }
+  function renderLen() {
+    const l = line(); const box = $('#lenbar');
+    const mn = l?.min_sec, mx = l?.max_sec;
+    box.classList.toggle('show', !!(mn || mx));
+    if (!(mn || mx)) return;
+    st.lenScale = mx || mn * 1.6;
+    const m = $('#lenmin'); m.style.display = mn ? '' : 'none'; if (mn) m.style.left = `${(mn / st.lenScale) * 100}%`;
+    $('#lenlbl').textContent = mn && mx ? `mindestens ${fmtSec(mn)} · höchstens ${fmtSec(mx)}` : mn ? `mindestens ${fmtSec(mn)}` : `höchstens ${fmtSec(mx)} (stoppt automatisch)`;
+    if (st.state !== 'rec') { $('#lenfill').style.transform = 'scaleX(0)'; $('#lenbar').className = 'lenbar show'; }
+  }
+  function renderMic() {
+    $('#led').classList.toggle('on', rec.active);
+    $('#miclbl').textContent = rec.active ? shortLabel(st.micLabel) : 'Mikrofon';
+  }
+  function shortLabel(s) { s = String(s || 'Mikrofon').replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)\s*$/i, ''); return s.length > 32 ? s.slice(0, 31) + '…' : s; }
   function renderHint() {
+    renderMic(); renderLen();
     const h = $('#hint'); const b = $('#recbtn');
     b.classList.toggle('on', st.state === 'rec'); b.classList.toggle('counting', st.state === 'counting');
     b.disabled = st.state === 'busy' || !line();
@@ -388,11 +430,11 @@ async function renderStudio(sid) {
   function sizeCanvas() { const r = canvas.getBoundingClientRect(); const d = devicePixelRatio || 1; canvas.width = r.width * d; canvas.height = r.height * d; }
   sizeCanvas();
   const onResize = () => sizeCanvas(); window.addEventListener('resize', onResize);
+  st.peak = 0; st.shown = 0;
   rec.onLevel = (p) => {
     st.levels.push({ p, r: st.state === 'rec' });
     if (st.levels.length > 400) st.levels.shift();
-    const db = p > 0 ? 20 * Math.log10(p) : -100;
-    const m = view.querySelector('#meter'); if (m) m.style.width = `${Math.max(0, Math.min(100, ((db + 60) / 60) * 100))}%`;
+    st.peak = Math.max(st.peak, p);
   };
   function draw() {
     const W = canvas.width, H = canvas.height, d = devicePixelRatio || 1;
@@ -411,7 +453,22 @@ async function renderStudio(sid) {
       roundRect(g, x, (H - h) / 2, bw, h, bw / 2);
     }
     g.globalAlpha = 1;
-    if (st.state === 'rec') $('#timer').textContent = fmt((performance.now() - st.t0) / 1000);
+    if (st.state === 'rec') {
+      const el = (performance.now() - st.t0) / 1000; const l = line();
+      $('#timer').textContent = fmt(el);
+      if (l && (l.min_sec || l.max_sec)) {
+        $('#lenfill').style.transform = `scaleX(${Math.min(1, el / st.lenScale).toFixed(4)})`;
+        const lb = $('#lenbar');
+        lb.classList.toggle('ok', !l.min_sec || el >= l.min_sec);
+        lb.classList.toggle('near', !!l.max_sec && el >= l.max_sec - 1.5);
+        if (l.max_sec && el >= l.max_sec) { toast(`Maximallänge erreicht (${fmtSec(l.max_sec)})`, 'info', 2200); stopRec(); }
+      }
+    }
+    const target = levelToScale(st.peak); st.peak = 0;
+    st.shown = target > st.shown ? target : st.shown * 0.9 + target * 0.1; // schnell hoch, sanft runter
+    const cp = `inset(0 ${(100 - st.shown * 100).toFixed(1)}% 0 0 round 5px)`;
+    $('#meter').style.clipPath = cp;
+    const bm = document.getElementById('bigmeter'); if (bm) bm.style.clipPath = cp;
     st.raf = requestAnimationFrame(draw);
   }
   function roundRect(c, x, y, w, h, r) { c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.fill(); }
@@ -421,8 +478,8 @@ async function renderStudio(sid) {
   async function ensureMic() {
     if (rec.active) { if (rec.ctx.state === 'suspended') await rec.ctx.resume(); return true; }
     try {
-      const label = await rec.start(st.deviceId);
-      toast(label.length > 34 ? label.slice(0, 34) + '…' : label, 'ok', 1800);
+      st.micLabel = await rec.start(st.deviceId);
+      renderMic();
       return true;
     } catch (e) {
       if (st.deviceId) { st.deviceId = ''; store.set('ls_mic', null); return ensureMic(); }
@@ -448,13 +505,17 @@ async function renderStudio(sid) {
     st.ov && st.ov.remove(); st.state = 'idle'; renderHint();
   }
   function beginRec() {
-    st.cdTimers = []; rec.begin(); st.t0 = performance.now(); st.state = 'rec'; renderHint();
+    st.cdTimers = []; rec.begin(); st.t0 = performance.now() - rec.preSec * 1000; st.state = 'rec'; renderHint();
     navigator.vibrate && navigator.vibrate(30);
   }
   async function stopRec() {
+    if (st.state !== 'rec') return;
     const r = rec.end(); st.state = 'idle';
     $('#timer').textContent = fmt(r.duration);
     if (r.duration < 0.6) { renderHint(); return toast('Zu kurz, nochmal versuchen', 'warn'); }
+    const lm = line();
+    if (lm.min_sec && r.duration < lm.min_sec - 0.05) { renderHint(); return toast(`Zu kurz: mindestens ${fmtSec(lm.min_sec)} Nochmal!`, 'warn', 3500); }
+    if (lm.max_sec && r.duration > lm.max_sec) { r.blob = await trimWav(r.blob, lm.max_sec, r.sampleRate); r.duration = lm.max_sec; }
     if (r.clipped) toast('Etwas zu laut, geh ein Stück weiter weg vom Mikro', 'warn', 4000);
     st.pending = { ...r, lineId: line().id };
     await upload();
@@ -484,11 +545,16 @@ async function renderStudio(sid) {
 
   async function refresh() { st.data = await api.rpc('speaker_data', { sid, pw: creds.pw }); renderMeta(); renderCard(0, false); renderTakes(); renderHint(); }
 
-  function settings() {
+  function settings(first) {
     const s = sheet(`
-      <h2>Mikrofon</h2><p class="center">Für die beste Qualität: externes Mikro oder Headset wählen.</p>
-      <select class="field" id="dev"><option value="">Standard-Mikrofon</option></select>
-      <div class="meter" style="max-width:none;margin:14px 0 6px;height:6px;border-radius:3px"><i id="m2"></i></div>
+      <h2>${first ? 'Kurzer Mikro-Check' : 'Mikrofon'}</h2>
+      <p class="center">${first ? 'Wähl dein Mikro und mach eine Testaufnahme, bevor du loslegst.' : 'Wähl dein Mikro und teste, wie du klingst.'}</p>
+      <div class="group dev-list" id="devs" style="box-shadow:none;background:var(--card-2)"><div class="uploading"><div class="spinner"></div><span class="meta">Mikrofone werden gesucht…</span></div></div>
+      <div class="section-h" style="margin:20px 4px 6px">Pegel</div>
+      <div class="big-meter"><i id="bigmeter"></i></div>
+      <div class="meter-legend"><span>leise</span><span>gut</span><span>zu laut</span></div>
+      <button class="btn btn-secondary btn-block test-btn" style="margin-top:14px" id="testbtn"><span class="fill"></span><span id="testlbl">Test aufnehmen (3 Sek.)</span></button>
+      <div class="mic-status" id="micstatus">Sag etwas: Der Balken sollte beim Sprechen bis ins Gelbe gehen.</div>
       <div class="group" style="box-shadow:none;background:var(--card-2);margin-top:18px">
         <label class="row plain" style="cursor:pointer"><span class="grow">3-2-1 Countdown</span>
           <span class="switch"><input type="checkbox" id="cd" ${st.countdown ? 'checked' : ''}><span class="track"></span><span class="knob"></span></span></label>
@@ -497,25 +563,71 @@ async function renderStudio(sid) {
       <div class="group" style="box-shadow:none;background:var(--card-2)">
         <div class="row plain"><span class="grow meta" style="color:var(--text)">🎧 Kopfhörer auf, damit der Discord-Call nicht mit aufgenommen wird.</span></div>
         <div class="row plain"><span class="grow meta" style="color:var(--text)">🤫 Ruhiger Raum. Weiche Möbel, Decken und Vorhänge schlucken Hall.</span></div>
-        <div class="row plain"><span class="grow meta" style="color:var(--text)">📏 Etwa eine Handbreit Abstand zum Mikro. Pegel sollte beim Sprechen ins Gelbe gehen, nie ins Rote.</span></div>
+        <div class="row plain"><span class="grow meta" style="color:var(--text)">📏 Etwa eine Handbreit Abstand zum Mikro.</span></div>
       </div>
-      <button class="btn btn-secondary btn-block" style="margin-top:20px" data-close>Fertig</button>
-      <button class="btn btn-block" style="margin-top:6px;color:var(--red)" id="logout">Abmelden</button>`);
-    const sel = s.querySelector('#dev');
+      <button class="btn btn-primary btn-block" style="margin-top:20px" data-close>${first ? 'Los geht’s' : 'Fertig'}</button>
+      ${first ? '' : '<button class="btn btn-block" style="margin-top:6px;color:var(--red)" id="logout">Abmelden</button>'}`);
+    store.set('ls_miccheck', 1);
+    const devs = s.querySelector('#devs'); const status = s.querySelector('#micstatus');
+    const testBtn = s.querySelector('#testbtn'); const testLbl = s.querySelector('#testlbl');
+    let testing = false, testUrl = null, testTimer = 0, peakSeen = 0;
     const fill = async () => {
-      try {
-        const ds = await StudioRecorder.devices();
-        sel.innerHTML = '<option value="">Standard-Mikrofon</option>' + ds.filter((d) => d.deviceId && d.deviceId !== 'default').map((d, i) => `<option value="${esc(d.deviceId)}" ${d.deviceId === st.deviceId ? 'selected' : ''}>${esc(d.label || 'Mikrofon ' + (i + 1))}</option>`).join('');
-      } catch {}
+      let ds = [];
+      try { ds = (await StudioRecorder.devices()).filter((d) => d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications'); } catch {}
+      const track = rec.stream?.getAudioTracks()[0];
+      let cur = st.deviceId || track?.getSettings().deviceId || '';
+      if (!ds.some((d) => d.deviceId === cur)) cur = (ds.find((d) => track && d.label === track.label) || ds[0] || {}).deviceId;
+      if (!ds.length) { devs.innerHTML = `<div class="empty">${rec.active ? esc(shortLabel(st.micLabel)) : 'Kein Mikrofon gefunden. Erlaube den Zugriff im Browser.'}</div>`; return; }
+      morph(devs, () => {
+        devs.innerHTML = ds.map((d, i) => `<button class="row plain ${d.deviceId === cur ? 'sel' : ''}" data-dev="${esc(d.deviceId)}">
+          <span class="grow title">${esc(shortLabel(d.label || 'Mikrofon ' + (i + 1)))}</span>
+          <svg class="tick" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></button>`).join('');
+      });
     };
     ensureMic().then(fill).then(renderHint);
-    sel.onchange = async () => { st.deviceId = sel.value; store.set('ls_mic', sel.value || null); await rec.stop(); await ensureMic(); renderHint(); };
-    s.querySelector('#cd').onchange = (e) => { st.countdown = e.target.checked; store.set('ls_countdown', st.countdown); renderHint(); };
-    s.querySelector('#logout').onclick = () => { store.set('ls_speaker', null); closeSheet(); location.hash = ''; };
-    const mm = s.querySelector('#m2');
+    devs.addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-dev]'); if (!b || testing) return;
+      devs.querySelectorAll('.row').forEach((r) => r.classList.toggle('sel', r === b));
+      st.deviceId = b.dataset.dev; store.set('ls_mic', st.deviceId);
+      await rec.stop(); await ensureMic(); renderHint();
+      status.className = 'mic-status'; status.textContent = `${shortLabel(st.micLabel)} ist aktiv. Mach eine Testaufnahme.`;
+    });
     const prevLevel = rec.onLevel;
-    rec.onLevel = (p) => { prevLevel(p); const db = p > 0 ? 20 * Math.log10(p) : -100; mm.style.width = `${Math.max(0, Math.min(100, ((db + 60) / 60) * 100))}%`; };
-    const obs = new MutationObserver(() => { if (!document.body.contains(s)) { obs.disconnect(); rec.onLevel = prevLevel; } });
+    rec.onLevel = (p) => { prevLevel && prevLevel(p); if (testing) peakSeen = Math.max(peakSeen, p); };
+    testBtn.onclick = async () => {
+      if (testing) return;
+      if (testUrl && testLbl.dataset.mode === 'play') { playToggle('miktest', testUrl); return; }
+      if (!(await ensureMic())) return;
+      stopPlayback(); testing = true; peakSeen = 0;
+      testBtn.classList.add('rec'); testLbl.textContent = 'Nimmt auf… sprich jetzt!';
+      status.className = 'mic-status'; status.textContent = 'Sag zum Beispiel: „Erster Tag am MIT!“';
+      rec.begin();
+      testTimer = setTimeout(() => {
+        const r = rec.end(); testing = false; testBtn.classList.remove('rec');
+        if (testUrl) URL.revokeObjectURL(testUrl);
+        testUrl = URL.createObjectURL(r.blob);
+        testLbl.dataset.mode = 'play'; testLbl.textContent = '▶︎ Test anhören';
+        const ok = levelToScale(peakSeen);
+        if (r.clipped || ok > 0.97) { status.className = 'mic-status bad'; status.textContent = 'Zu laut: Geh etwas weiter weg vom Mikro.'; }
+        else if (ok < 0.45) { status.className = 'mic-status bad'; status.textContent = 'Ziemlich leise: Geh näher ran oder wähl ein anderes Mikro.'; }
+        else { status.className = 'mic-status good'; status.textContent = 'Klingt gut! Pegel passt.'; }
+        playToggle('miktest', testUrl);
+        setTimeout(() => { if (document.body.contains(testBtn)) { testLbl.dataset.mode = 'play'; } }, 0);
+        const again = document.createElement('button'); again.className = 'btn btn-block'; again.style.cssText = 'margin-top:4px;color:var(--blue);height:40px;font-size:15px'; again.textContent = 'Neuer Test';
+        again.onclick = () => { again.remove(); testLbl.dataset.mode = ''; stopPlayback(); testBtn.click(); };
+        if (!s.querySelector('#again')) { again.id = 'again'; testBtn.after(again); }
+      }, 3000);
+    };
+    s.querySelector('#cd').onchange = (e) => { st.countdown = e.target.checked; store.set('ls_countdown', st.countdown); renderHint(); };
+    const lo = s.querySelector('#logout'); if (lo) lo.onclick = () => { store.set('ls_speaker', null); closeSheet(); location.hash = ''; };
+    const obs = new MutationObserver(() => {
+      if (!document.body.contains(s)) {
+        obs.disconnect(); clearTimeout(testTimer);
+        if (testing) { rec.end(); testing = false; }
+        if (player.id === 'miktest') stopPlayback();
+        rec.onLevel = prevLevel;
+      }
+    });
     obs.observe(document.body, { childList: true });
   }
 
@@ -525,7 +637,7 @@ async function renderStudio(sid) {
     if (act === 'rec') return onRec();
     if (act === 'prev') return go(st.idx - 1);
     if (act === 'next') return go(st.idx + 1);
-    if (act === 'settings') return settings();
+    if (act === 'settings') return st.state === 'idle' ? settings() : null;
     if (act === 'retry') return upload();
     if (act === 'save-local') return saveLocal();
     if (t.dataset.go) return go(+t.dataset.go);
@@ -566,6 +678,7 @@ async function renderStudio(sid) {
   };
 
   renderMeta(); renderCard(); renderTakes(); renderHint();
+  if (!store.get('ls_miccheck') && st.data.lines.length) setTimeout(() => { if (!openSheetEl && st.state === 'idle') settings(true); }, 1400);
 }
 
 /* =====================================================================
@@ -624,6 +737,7 @@ function adminDashboard(pw, data) {
     <div id="spk"></div>`, 'wide');
   const box = v.querySelector('#spk');
 
+  let firstRender = true;
   function render() {
     const nl = speakers.reduce((s, x) => s + x.lines.length, 0);
     const nd = speakers.reduce((s, x) => s + x.lines.filter((l) => l.takes.length).length, 0);
@@ -631,7 +745,7 @@ function adminDashboard(pw, data) {
     v.querySelector('#sum').textContent = speakers.length ? `${speakers.length} Sprecher · ${nd} von ${nl} Lines aufgenommen · ${nt} Takes` : 'Leg los: Füge deinen ersten Sprecher hinzu.';
     box.innerHTML = speakers.map((s, si) => {
       const done = s.lines.filter((l) => l.takes.length).length;
-      return `<section class="spk fade-up" style="--d:${350 + si * 80}ms" data-spk="${s.id}">
+      return `<section class="spk ${firstRender ? 'fade-up' : ''}" style="--d:${350 + si * 80}ms" data-spk="${s.id}">
         <div class="spk-head">${avatar(s.name)}<h3>${esc(s.name)}</h3><span class="meta">${done}/${s.lines.length}</span>
           <button class="mini" data-act="copy-link" aria-label="Link kopieren" title="Link für ${esc(s.name)} kopieren">${I.link}</button>
           <button class="mini" data-act="edit-speaker" aria-label="Bearbeiten" title="Name / Passwort ändern">${I.edit}</button>
@@ -644,6 +758,10 @@ function adminDashboard(pw, data) {
                 <div class="aline-body">
                   <textarea class="inline-input text" rows="1" data-field="text" aria-label="Line-Text">${esc(l.text)}</textarea>
                   <textarea class="inline-input note" rows="1" data-field="note" placeholder="+ Regieanweisung (z. B. aufgeregt, Spider-Man-mäßig)" aria-label="Regieanweisung">${esc(l.note)}</textarea>
+                  <div class="limits">${I.clock}<span>Länge</span>
+                    <label>min <input inputmode="decimal" data-lim="min" placeholder="–" value="${l.min_sec ?? ''}" aria-label="Mindestlänge in Sekunden"></label>
+                    <label>max <input inputmode="decimal" data-lim="max" placeholder="–" value="${l.max_sec ?? ''}" aria-label="Maximallänge in Sekunden"></label>
+                    <span>Sek.</span></div>
                 </div>
                 <div class="aline-tools">
                   <button class="mini" data-act="up" aria-label="Nach oben" ${i === 0 ? 'disabled style="opacity:.25"' : ''}>${I.up}</button>
@@ -669,11 +787,12 @@ function adminDashboard(pw, data) {
     }).join('');
     box.querySelectorAll('textarea.inline-input').forEach(autosize);
     syncPlayButtons();
+    firstRender = false;
   }
   function autosize(t) { t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; }
 
   async function reload(quiet) {
-    try { const d = await api.rpc('admin_data', { pw }); if (JSON.stringify(d) !== JSON.stringify(speakers)) { speakers = d; render(); } }
+    try { const d = await api.rpc('admin_data', { pw }); if (JSON.stringify(d) !== JSON.stringify(speakers)) { speakers = d; morph(box, render); } }
     catch (e) { if (!quiet) toast(e.message, 'err'); }
   }
   const find = (sid) => speakers.find((s) => s.id === sid);
@@ -769,10 +888,24 @@ function adminDashboard(pw, data) {
   });
   v.addEventListener('input', (e) => { if (e.target.matches('textarea.inline-input')) autosize(e.target); });
   v.addEventListener('keydown', (e) => {
-    if (e.target.matches('textarea.inline-input') && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.target.blur(); }
+    if ((e.target.matches('textarea.inline-input') || e.target.matches('[data-lim]')) && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.target.blur(); }
   });
   v.addEventListener('focusout', async (e) => {
-    const t = e.target; if (!t.matches('textarea.inline-input')) return;
+    const t = e.target;
+    if (t.matches('[data-lim]')) {
+      const row = t.closest('[data-lid]'); const lid = row.dataset.lid;
+      const l = speakers.flatMap((s) => s.lines).find((x) => x.id === lid);
+      const mn = parseSec(row.querySelector('[data-lim=min]').value), mx = parseSec(row.querySelector('[data-lim=max]').value);
+      row.querySelector('[data-lim=min]').value = mn ?? ''; row.querySelector('[data-lim=max]').value = mx ?? '';
+      if (!l || ((l.min_sec ?? null) === mn && (l.max_sec ?? null) === mx)) return;
+      if (mn && mx && mn > mx) { t.closest('.limits').classList.remove('shake'); void t.offsetWidth; t.closest('.limits').classList.add('shake'); return toast('Minimum ist größer als Maximum', 'warn'); }
+      try {
+        await api.rpc('admin_set_line_limits', { pw, lid, new_min: mn, new_max: mx });
+        l.min_sec = mn; l.max_sec = mx; toast(mn || mx ? `Länge: ${limitText(l)}` : 'Keine Längenvorgabe', 'ok', 1500);
+      } catch (err) { toast(/Datenbank nicht eingerichtet/.test(err.message) ? 'Bitte zuerst UPDATE-1-laenge.sql in Supabase ausführen' : err.message, 'err', 4500); }
+      return;
+    }
+    if (!t.matches('textarea.inline-input')) return;
     const lid = t.closest('[data-lid]').dataset.lid;
     const l = speakers.flatMap((s) => s.lines).find((x) => x.id === lid);
     const val = t.dataset.field === 'text' ? t.value.trim() : t.value.trim();
